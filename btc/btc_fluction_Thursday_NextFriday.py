@@ -57,8 +57,8 @@ def fetch_minute_data(days=30):
     full_df = pd.concat(all_data).sort_index()
     return full_df[~full_df.index.duplicated(keep='first')]
 
-def calculate_precise_session_stats(df):
-    """Calculate statistics with precise time windows"""
+def calculate_weekly_volatility(df):
+    """Calculate weekly volatility from Thursday 12PM to next Friday 12PM"""
     results = []
     
     if df.index.tz is None:
@@ -66,19 +66,24 @@ def calculate_precise_session_stats(df):
     elif str(df.index.tz) != 'UTC':
         df = df.tz_convert(pytz.utc)
     
-    unique_dates = pd.to_datetime(df.index.date).unique()
+    # Find all Thursdays in the data
+    thursdays = df[df.index.dayofweek == 3]  # 3 is Thursday
     
-    for date in unique_dates:
-        open_time = datetime.combine(date, datetime.strptime("02:30", "%H:%M").time()).replace(tzinfo=pytz.utc)
-        close_time = open_time + timedelta(hours=9, minutes=30)
+    for thursday_date in thursdays.index.normalize().unique():
+        # Get Thursday 12PM UTC
+        thursday_start = thursday_date + timedelta(hours=12)
         
-        session_data = df[(df.index >= open_time) & (df.index <= close_time)]
+        # Get next Friday 12PM UTC (7 days later)
+        friday_end = thursday_start + timedelta(days=7)
         
-        if len(session_data) > 10:
-            open_price = session_data.iloc[0]['close']
-            high_price = session_data['high'].max()
-            low_price = session_data['low'].min()
-            close_price = session_data.iloc[-1]['close']
+        # Get data for this weekly period
+        weekly_data = df[(df.index >= thursday_start) & (df.index <= friday_end)]
+        
+        if len(weekly_data) > 10:
+            open_price = weekly_data.iloc[0]['close']
+            high_price = weekly_data['high'].max()
+            low_price = weekly_data['low'].min()
+            close_price = weekly_data.iloc[-1]['close']
             
             # Calculate both upward and downward volatility
             upward_vol = ((high_price - open_price) / open_price) * 100
@@ -88,15 +93,16 @@ def calculate_precise_session_stats(df):
             true_volatility = max(upward_vol, downward_vol)
             direction = "up" if upward_vol > downward_vol else "down"
             
-            # Get day of week
-            day_of_week = date.strftime('%A')
+            # Get date range
+            start_date = weekly_data.index[0].date()
+            end_date = weekly_data.index[-1].date()
             
             results.append({
-                'date': date.date(),
-                'date_str': date.strftime('%Y-%m-%d'),
-                'day_of_week': day_of_week,
-                'open_time': open_time,
-                'close_time': close_time,
+                'start_date': start_date,
+                'end_date': end_date,
+                'date_range': f"{start_date} to {end_date}",
+                'open_time': thursday_start,
+                'close_time': friday_end,
                 'open': open_price,
                 'high': high_price,
                 'low': low_price,
@@ -107,10 +113,10 @@ def calculate_precise_session_stats(df):
                 'downward_vol_pct': downward_vol,
                 'net_change_pct': ((close_price - open_price) / open_price) * 100,
                 'range_abs': high_price - low_price,
-                'data_points': len(session_data)
+                'data_points': len(weekly_data)
             })
     
-    return pd.DataFrame(results).sort_values('date')
+    return pd.DataFrame(results).sort_values('start_date')
 
 def create_interactive_plot(results_df, min_volatility=None):
     """Create interactive plot with Plotly"""
@@ -118,15 +124,14 @@ def create_interactive_plot(results_df, min_volatility=None):
     if min_volatility is not None:
         results_df = results_df[results_df['true_volatility_pct'] >= min_volatility]
         if results_df.empty:
-            print(f"No days found with volatility >= {min_volatility}%")
+            print(f"No weeks found with volatility >= {min_volatility}%")
             return None
     
     # Create figure with secondary y-axis
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
-    # Add day of week to hover text
-    results_df['hover_text'] = results_df.apply(
-        lambda row: f"{row['date_str']} ({row['day_of_week']})", axis=1)
+    # Add date range to hover text
+    results_df['hover_text'] = results_df['date_range']
     
     # Add volatility bars with color based on direction
     colors = ['green' if x == 'up' else 'red' for x in results_df['direction']]
@@ -138,7 +143,7 @@ def create_interactive_plot(results_df, min_volatility=None):
             marker_color=colors,
             opacity=0.7,
             hovertemplate=(
-                "<b>Date:</b> %{x}<br>"
+                "<b>Date Range:</b> %{x}<br>"
                 "<b>Max Volatility:</b> %{y:.2f}%<br>"
                 "<b>Direction:</b> %{customdata[0]}<br>"
                 "<b>Open:</b> $%{customdata[1]:.2f}<br>"
@@ -165,7 +170,7 @@ def create_interactive_plot(results_df, min_volatility=None):
             name='Net Change %',
             mode='lines+markers',
             line=dict(color='blue', width=2),
-            hovertemplate="<b>Date:</b> %{x}<br><b>Net Change:</b> %{y:.2f}%"
+            hovertemplate="<b>Date Range:</b> %{x}<br><b>Net Change:</b> %{y:.2f}%"
         ),
         secondary_y=True,
     )
@@ -176,8 +181,8 @@ def create_interactive_plot(results_df, min_volatility=None):
     # Update layout
     title_suffix = f" (Volatility ≥ {min_volatility}%)" if min_volatility is not None else ""
     fig.update_layout(
-        title=f'BTC 6:30PM-12PM UTC: Maximum Price Moves{title_suffix}',
-        xaxis_title='Date (Day of Week)',
+        title=f'BTC Weekly Volatility (Thursday 12PM to Friday 12PM UTC){title_suffix}',
+        xaxis_title='Date Range',
         yaxis_title='Max Volatility %',
         yaxis2_title='Net Change %',
         hovermode="x unified",
@@ -191,7 +196,7 @@ def create_interactive_plot(results_df, min_volatility=None):
         showlegend=True
     )
     
-    # Add annotation for max volatility day
+    # Add annotation for max volatility week
     if not results_df.empty:
         max_vol_idx = results_df['true_volatility_pct'].idxmax()
         fig.add_annotation(
@@ -207,28 +212,26 @@ def create_interactive_plot(results_df, min_volatility=None):
 def main():
     print("Fetching minute-level BTC data...")
     try:
-        days = int(input("Enter number of days to analyze (e.g., 30, 90, 365): "))
+        days = int(input("Enter number of days to analyze (minimum 7 recommended): "))
+        if days < 7:
+            print("Warning: For weekly analysis, at least 7 days of data is recommended")
         btc_data = fetch_minute_data(days=days)
         print(f"Fetched data from {btc_data.index[0]} to {btc_data.index[-1]}")
     except Exception as e:
         print(f"Error fetching data: {e}")
         return
     
-    print("\nCalculating session statistics...")
-    results = calculate_precise_session_stats(btc_data)
+    print("\nCalculating weekly volatility (Thursday 12PM to Friday 12PM UTC)...")
+    results = calculate_weekly_volatility(btc_data)
     
     if results.empty:
         print("No results calculated - check your data")
         return
     
     print("\n=== Statistics Summary ===")
-    print(f"Average max volatility: {results['true_volatility_pct'].mean():.2f}%")
-    print(f"Maximum volatility day: {results['true_volatility_pct'].max():.2f}% on {results.loc[results['true_volatility_pct'].idxmax(), 'day_of_week']}")
-    print(f"Minimum volatility day: {results['true_volatility_pct'].min():.2f}%")
-    
-    # Print day-of-week distribution
-    print("\n=== Day of Week Distribution ===")
-    print(results['day_of_week'].value_counts().sort_index())
+    print(f"Average max weekly volatility: {results['true_volatility_pct'].mean():.2f}%")
+    print(f"Maximum volatility week: {results['true_volatility_pct'].max():.2f}% from {results.loc[results['true_volatility_pct'].idxmax(), 'date_range']}")
+    print(f"Minimum volatility week: {results['true_volatility_pct'].min():.2f}%")
     
     try:
         min_volatility = float(input("\nEnter minimum volatility percentage to filter (or press Enter to show all): ") or 0)
@@ -241,7 +244,7 @@ def main():
     
     save_csv = input("\nDo you want to save the results to CSV? (y/n): ").lower()
     if save_csv == 'y':
-        filename = f"btc_true_volatility_{days}days.csv"
+        filename = f"btc_weekly_volatility_{days}days.csv"
         results.to_csv(filename, index=False)
         print(f"Results saved to {filename}")
 
